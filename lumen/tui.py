@@ -10,6 +10,7 @@ from pathlib import Path
 from . import chat as chat_mod
 from . import config as config_mod
 from . import markdown as md_mod
+from . import tools as tools_mod
 from .ollama_client import OllamaError
 
 COLOR_TOPBAR = 1     # white on black -- top branding row only
@@ -237,6 +238,7 @@ Up/Down - browse input history
 Ctrl+W - delete last word
 Ctrl+S - edit system prompt
 Ctrl+T - collapse/expand all thinking blocks
+Ctrl+U - toggle tool use for this session
 Esc / Ctrl+X - stop the model, stay in chat
 Ctrl+N - start a new conversation
 Ctrl+B - back to model picker
@@ -390,10 +392,15 @@ def chat_screen(stdscr, client, model_info, config):
         options["temperature"] = config["temperature"]
     if config.get("max_tokens"):
         options["num_predict"] = config["max_tokens"]
-    tools_enabled = config.get("tools", {})
+    configured_tools = config.get("tools", {})
+    tools_active = True  # session-only toggle, not persisted to config.hcl
+
+    def _effective_tools():
+        return configured_tools if tools_active else tools_mod.all_disabled()
 
     convo = chat_mod.Conversation(
-        client, model_name, config_mod.expand_system_prompt(system_prompt), tools_enabled, options
+        client, model_name, config_mod.expand_system_prompt(system_prompt),
+        _effective_tools(), options,
     )
 
     history = []
@@ -429,7 +436,7 @@ def chat_screen(stdscr, client, model_info, config):
             input_buf = hist_draft
 
     HELP_TEXT = (
-        "Ctrl+S prompt  Ctrl+T thinking  Esc/Ctrl+X stop  Ctrl+N new  Ctrl+B models  "
+        "Ctrl+S sys  Ctrl+T think  Ctrl+U tools  Esc/^X stop  Ctrl+N new  Ctrl+B back  "
         "Ctrl+Q/C/exit quit"
     )
 
@@ -487,7 +494,8 @@ def chat_screen(stdscr, client, model_info, config):
         prompt = "> " + input_buf
         safe_addstr(stdscr, input_row, 0, prompt[: max(0, w - 1)])
 
-        status_line = f"Model: {model_name}"
+        tools_flag = "on" if tools_active else "off"
+        status_line = f"Model: {model_name}   Tools: {tools_flag}"
         if status_msg:
             status_line += f"   |   {status_msg}"
         safe_addstr(stdscr, status_row, 0, status_line[: max(0, w - 1)], curses.color_pair(COLOR_DIM))
@@ -511,7 +519,7 @@ def chat_screen(stdscr, client, model_info, config):
         if key == 14:  # Ctrl+N
             convo = chat_mod.Conversation(
                 client, model_name, config_mod.expand_system_prompt(system_prompt),
-                tools_enabled, options,
+                _effective_tools(), options,
             )
             history.clear()
             status_msg = f"New conversation with {model_name}"
@@ -533,6 +541,12 @@ def chat_screen(stdscr, client, model_info, config):
                 collapsed_indices.update(thinking_idxs)
             else:
                 collapsed_indices.difference_update(thinking_idxs)
+            render()
+            continue
+        if key == 21:  # Ctrl+U: toggle tool use for this session
+            tools_active = not tools_active
+            convo.set_tools_enabled(_effective_tools())
+            status_msg = f"Tools {'enabled' if tools_active else 'disabled'} for this session."
             render()
             continue
         if key == curses.KEY_MOUSE:

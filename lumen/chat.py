@@ -21,6 +21,10 @@ class Conversation:
         else:
             self.messages.insert(0, {"role": "system", "content": text})
 
+    def set_tools_enabled(self, tools_enabled):
+        self.tools_enabled = tools_enabled or {}
+        self.tool_specs = tools_mod.specs_for(self.tools_enabled)
+
     def send(
         self, user_text, on_content=None, on_tool_call=None, on_thinking=None,
         on_notice=None, stop_event=None,

@@ -142,6 +142,15 @@ def specs_for(enabled):
     return [s for s in TOOL_SPECS if enabled.get(s["function"]["name"], True)]
 
 
+def all_tool_names():
+    return [s["function"]["name"] for s in TOOL_SPECS]
+
+
+def all_disabled():
+    """A tools_enabled dict that turns every known tool off."""
+    return {name: False for name in all_tool_names()}
+
+
 def call_tool(name, arguments, enabled=None):
     arguments = arguments or {}
     if enabled is not None and not enabled.get(name, True):
