@@ -10,6 +10,7 @@ from pathlib import Path
 from . import chat as chat_mod
 from . import config as config_mod
 from . import markdown as md_mod
+from . import research as research_mod
 from . import tools as tools_mod
 from .ollama_client import OllamaError
 
@@ -229,7 +230,9 @@ def _format_transcript(history, model_name):
 
 CHAT_HELP_MESSAGE = """Commands:
 /help - show this help
+/research <topic> - run the Plan/extract/synthesize/critique/Polish pipeline
 /save <path> - save the full transcript (including tool output) to a text file
+/save -r <path> - save only the last research report (Markdown)
 /exit - quit Lumen
 
 Shortcuts:
@@ -412,6 +415,7 @@ def chat_screen(stdscr, client, model_info, config):
     input_history = []
     hist_idx = None
     hist_draft = ""
+    last_report = None  # most recent /research Polish output; /save prefers this
 
     def _history_prev():
         nonlocal input_buf, hist_idx, hist_draft
@@ -434,6 +438,76 @@ def chat_screen(stdscr, client, model_info, config):
         else:
             hist_idx = None
             input_buf = hist_draft
+
+    def _run_worker(work_fn):
+        """Run work_fn(stop_event, dirty) on a background thread while the
+        main thread keeps polling for input, so Ctrl+C/Ctrl+Q (quit),
+        Ctrl+X/Esc (stop and stay), typed '/exit', and normal input editing
+        all still work while a model is generating. Only this polling loop
+        ever calls render() -- curses is not thread-safe, so work_fn's
+        callbacks must only touch shared state and set dirty["flag"].
+
+        Returns (quit_requested, outcome) where outcome has "error" (an
+        OllamaError or None) and "done" (always True once this returns).
+        """
+        nonlocal input_buf, status_msg
+        dirty = {"flag": False}
+        stop_event = threading.Event()
+        outcome = {"error": None, "done": False}
+
+        def runner():
+            try:
+                work_fn(stop_event, dirty)
+            except OllamaError as e:
+                outcome["error"] = e
+            finally:
+                outcome["done"] = True
+
+        gen_thread = threading.Thread(target=runner, daemon=True)
+        gen_thread.start()
+
+        stdscr.timeout(80)
+        quit_requested = False
+        while not outcome["done"]:
+            if dirty["flag"]:
+                render()
+                dirty["flag"] = False
+            k = stdscr.getch()
+            if k == -1:
+                continue
+            if k in (3, 17):  # Ctrl+C / Ctrl+Q: interrupt + quit now
+                stop_event.set()
+                quit_requested = True
+                break
+            if k in (24, 27):  # Ctrl+X / Esc: interrupt, stay in chat
+                stop_event.set()
+                status_msg = "Generation stopped."
+                break
+            if k == curses.KEY_RESIZE:
+                dirty["flag"] = True
+            elif k in (curses.KEY_BACKSPACE, 127, 8):
+                input_buf = input_buf[:-1]
+                dirty["flag"] = True
+            elif k == 23:  # Ctrl+W: delete last word
+                input_buf = _erase_last_word(input_buf)
+                dirty["flag"] = True
+            elif k == curses.KEY_UP:
+                _history_prev()
+                dirty["flag"] = True
+            elif k == curses.KEY_DOWN:
+                _history_next()
+                dirty["flag"] = True
+            elif k in (10, 13, curses.KEY_ENTER):
+                if input_buf.strip().lower() == "/exit":
+                    stop_event.set()
+                    quit_requested = True
+                    break
+            elif 32 <= k < 127:
+                input_buf += chr(k)
+                dirty["flag"] = True
+        stdscr.timeout(-1)
+        gen_thread.join(timeout=2.0)
+        return quit_requested, outcome
 
     HELP_TEXT = (
         "Ctrl+S sys  Ctrl+T think  Ctrl+U tools  Esc/^X stop  Ctrl+N new  Ctrl+B back  "
@@ -601,16 +675,129 @@ def chat_screen(stdscr, client, model_info, config):
                 continue
             if text.lower() == "/save" or text.lower().startswith("/save "):
                 arg = text[len("/save"):].strip()
+                want_report = False
+                if arg == "-r" or arg.startswith("-r "):
+                    want_report = True
+                    arg = arg[2:].strip()
                 if not arg:
-                    status_msg = "Usage: /save <path>"
+                    status_msg = "Usage: /save [-r] <path>"
+                elif want_report and last_report is None:
+                    status_msg = "No research report yet -- run /research first."
                 else:
                     try:
                         target = Path(arg).expanduser()
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_text(_format_transcript(history, model_name))
-                        status_msg = f"Transcript saved to {target}"
+                        if want_report:
+                            target.write_text(last_report.rstrip("\n") + "\n")
+                            status_msg = f"Report saved to {target}"
+                        else:
+                            target.write_text(_format_transcript(history, model_name))
+                            status_msg = f"Transcript saved to {target}"
                     except OSError as e:
-                        status_msg = f"Failed to save transcript: {e}"
+                        status_msg = f"Failed to save: {e}"
+                render()
+                continue
+
+            if text.lower() == "/research" or text.lower().startswith("/research "):
+                topic = text[len("/research"):].strip()
+                if not topic:
+                    status_msg = "Usage: /research <topic>"
+                    render()
+                    continue
+
+                input_history.append(text)
+                hist_idx = None
+                hist_draft = ""
+
+                add_block("user", text)
+                status_msg = "Research: starting..."
+                scroll = 0
+                render()
+
+                live = {"text": ""}
+                think = {"text": ""}
+
+                def _finalize_thinking():
+                    if history and history[-1][0] == "thinking_live":
+                        history[-1][0] = "thinking"
+                    think["text"] = ""
+
+                def _finalize_live():
+                    if history and history[-1][0] == "assistant_live":
+                        history[-1][0] = "assistant"
+                    live["text"] = ""
+
+                def research_work(stop_event, dirty):
+                    nonlocal last_report, status_msg
+
+                    def on_stage_start(stage):
+                        nonlocal status_msg
+                        _finalize_thinking()
+                        _finalize_live()
+                        status_msg = f"Research: {stage}..."
+                        add_block("info", f"── {stage} ──")
+                        dirty["flag"] = True
+
+                    def on_thinking(stage, chunk):
+                        think["text"] += chunk
+                        if history and history[-1][0] == "thinking_live":
+                            history[-1][1] = think["text"]
+                        else:
+                            add_block("thinking_live", think["text"])
+                        dirty["flag"] = True
+
+                    def on_content(stage, chunk):
+                        _finalize_thinking()
+                        live["text"] += chunk
+                        if history and history[-1][0] == "assistant_live":
+                            history[-1][1] = live["text"]
+                        else:
+                            add_block("assistant_live", live["text"])
+                        dirty["flag"] = True
+
+                    def on_tool_call(stage, name, args, result):
+                        nonlocal status_msg
+                        _finalize_thinking()
+                        add_block("tool", result, meta={"name": name, "args": args})
+                        status_msg = f"Research ({stage}): ran tool {name}"
+                        dirty["flag"] = True
+
+                    def on_notice(stage, message):
+                        _finalize_thinking()
+                        add_block("info", f"[{stage}] {message}")
+                        dirty["flag"] = True
+
+                    def on_stage_done(stage, stage_text):
+                        _finalize_thinking()
+                        _finalize_live()
+                        dirty["flag"] = True
+
+                    report = research_mod.run(
+                        client, model_name, topic, _effective_tools(), options,
+                        stop_event=stop_event,
+                        callbacks={
+                            "on_stage_start": on_stage_start,
+                            "on_thinking": on_thinking,
+                            "on_content": on_content,
+                            "on_tool_call": on_tool_call,
+                            "on_notice": on_notice,
+                            "on_stage_done": on_stage_done,
+                        },
+                    )
+                    if report is not None:
+                        last_report = report
+                        status_msg = "Research complete. Use /save -r <path> to save the report."
+                    else:
+                        status_msg = "Research stopped."
+
+                quit_requested, outcome = _run_worker(research_work)
+                if quit_requested:
+                    return None
+
+                _finalize_thinking()
+                _finalize_live()
+                if outcome["error"] is not None:
+                    add_block("error", str(outcome["error"]))
                 render()
                 continue
 
@@ -625,7 +812,6 @@ def chat_screen(stdscr, client, model_info, config):
 
             live = {"text": ""}
             think = {"text": ""}
-            dirty = {"flag": False}
 
             def _finalize_thinking():
                 if history and history[-1][0] == "thinking_live":
@@ -635,107 +821,53 @@ def chat_screen(stdscr, client, model_info, config):
             # These callbacks run on the background generation thread, so
             # they only touch shared state + a dirty flag; only the main
             # thread ever calls render() (curses is not thread-safe).
-            def on_thinking(chunk):
-                think["text"] += chunk
-                if history and history[-1][0] == "thinking_live":
-                    history[-1][1] = think["text"]
-                else:
-                    add_block("thinking_live", think["text"])
-                dirty["flag"] = True
-
-            def on_content(chunk):
-                _finalize_thinking()
-                live["text"] += chunk
-                if history and history[-1][0] == "assistant_live":
-                    history[-1][1] = live["text"]
-                else:
-                    add_block("assistant_live", live["text"])
-                dirty["flag"] = True
-
-            def on_tool_call(name, args, result):
-                nonlocal status_msg
-                _finalize_thinking()
-                add_block("tool", result, meta={"name": name, "args": args})
-                status_msg = f"ran tool: {name}"
-                dirty["flag"] = True
-
-            def on_notice(message):
-                _finalize_thinking()
-                add_block("info", message)
-                dirty["flag"] = True
-
-            stop_event = threading.Event()
-            outcome = {"error": None, "done": False}
-
-            def worker():
-                try:
-                    convo.send(
-                        text,
-                        on_content=on_content,
-                        on_tool_call=on_tool_call,
-                        on_thinking=on_thinking,
-                        on_notice=on_notice,
-                        stop_event=stop_event,
-                    )
-                except OllamaError as e:
-                    outcome["error"] = e
-                finally:
-                    outcome["done"] = True
-
-            gen_thread = threading.Thread(target=worker, daemon=True)
-            gen_thread.start()
-
-            stdscr.timeout(80)
-            interrupted = False
-            while not outcome["done"]:
-                if dirty["flag"]:
-                    render()
-                    dirty["flag"] = False
-                k = stdscr.getch()
-                if k == -1:
-                    continue
-                if k in (3, 17):  # Ctrl+C / Ctrl+Q: interrupt + quit now
-                    stop_event.set()
-                    interrupted = True
-                    break
-                if k in (24, 27):  # Ctrl+X / Esc: interrupt generation, stay in chat
-                    stop_event.set()
-                    status_msg = "Generation stopped."
-                    break
-                if k == curses.KEY_RESIZE:
+            def chat_work(stop_event, dirty):
+                def on_thinking(chunk):
+                    think["text"] += chunk
+                    if history and history[-1][0] == "thinking_live":
+                        history[-1][1] = think["text"]
+                    else:
+                        add_block("thinking_live", think["text"])
                     dirty["flag"] = True
-                elif k in (curses.KEY_BACKSPACE, 127, 8):
-                    input_buf = input_buf[:-1]
-                    dirty["flag"] = True
-                elif k == 23:  # Ctrl+W: delete last word
-                    input_buf = _erase_last_word(input_buf)
-                    dirty["flag"] = True
-                elif k == curses.KEY_UP:
-                    _history_prev()
-                    dirty["flag"] = True
-                elif k == curses.KEY_DOWN:
-                    _history_next()
-                    dirty["flag"] = True
-                elif k in (10, 13, curses.KEY_ENTER):
-                    if input_buf.strip().lower() == "/exit":
-                        stop_event.set()
-                        interrupted = True
-                        break
-                elif 32 <= k < 127:
-                    input_buf += chr(k)
-                    dirty["flag"] = True
-            stdscr.timeout(-1)
 
-            if interrupted:
-                gen_thread.join(timeout=2.0)
+                def on_content(chunk):
+                    _finalize_thinking()
+                    live["text"] += chunk
+                    if history and history[-1][0] == "assistant_live":
+                        history[-1][1] = live["text"]
+                    else:
+                        add_block("assistant_live", live["text"])
+                    dirty["flag"] = True
+
+                def on_tool_call(name, args, result):
+                    nonlocal status_msg
+                    _finalize_thinking()
+                    add_block("tool", result, meta={"name": name, "args": args})
+                    status_msg = f"ran tool: {name}"
+                    dirty["flag"] = True
+
+                def on_notice(message):
+                    _finalize_thinking()
+                    add_block("info", message)
+                    dirty["flag"] = True
+
+                convo.send(
+                    text,
+                    on_content=on_content,
+                    on_tool_call=on_tool_call,
+                    on_thinking=on_thinking,
+                    on_notice=on_notice,
+                    stop_event=stop_event,
+                )
+
+            quit_requested, outcome = _run_worker(chat_work)
+            if quit_requested:
                 return None
 
-            gen_thread.join(timeout=2.0)
+            _finalize_thinking()
             if outcome["error"] is not None:
-                _finalize_thinking()
                 add_block("error", str(outcome["error"]))
             else:
-                _finalize_thinking()
                 if history and history[-1][0] == "assistant_live":
                     history[-1][0] = "assistant"
                 elif live["text"]:
