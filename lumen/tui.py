@@ -413,6 +413,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     history = []
     input_buf = ""
     scroll = 0
+    prev_max_start = 0  # lets render() keep an up-scrolled view pinned in place
     status_msg = ""
     collapsed_indices = set()
     row_click_map = {}
@@ -527,6 +528,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     view_state = {"h": 1}
 
     def render():
+        nonlocal scroll, prev_max_start
         h, w = stdscr.getmaxyx()
         stdscr.erase()
         draw_top_bar(stdscr, w)
@@ -555,6 +557,13 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         view_h = max(1, sep_row - start_row)
         view_state["h"] = view_h
         max_start = max(0, len(lines) - view_h)
+        # Follow behavior: if the user has scrolled up, keep their view
+        # pinned to the same lines as new content streams in, instead of
+        # drifting along with it. At scroll == 0 (the bottom) new content
+        # keeps auto-following as before.
+        if scroll > 0 and max_start > prev_max_start:
+            scroll += max_start - prev_max_start
+        prev_max_start = max_start
         top = max(0, max_start - scroll)
         visible = lines[top:top + view_h]
         visible_owners = owners[top:top + view_h]
@@ -779,6 +788,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
                     report = research_mod.run(
                         client, model_name, topic, _effective_tools(), options,
                         stop_event=stop_event,
+                        voice_prompt=config_mod.expand_system_prompt(system_prompt),
                         callbacks={
                             "on_stage_start": on_stage_start,
                             "on_thinking": on_thinking,
