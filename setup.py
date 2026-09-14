@@ -5,6 +5,8 @@ setup(
     version="0.1.0",
     description="Pure-Python ncurses harness for chatting with local Ollama models.",
     packages=find_packages(include=["lumen", "lumen.*"]),
+    package_data={"lumen": ["default_systemprompt.txt"]},
+    include_package_data=True,
     install_requires=[
         "requests>=2.31",
         "ddgs>=9.0",

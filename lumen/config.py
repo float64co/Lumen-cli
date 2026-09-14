@@ -9,6 +9,7 @@ from . import hcl
 CONFIG_DIR = Path.home() / ".config" / "lumen"
 CONFIG_FILE = CONFIG_DIR / "config.hcl"
 SYSTEM_PROMPT_FILE = CONFIG_DIR / "systemprompt.txt"
+SYSTEM_PROMPTS_DIR = CONFIG_DIR / "systemprompts"
 
 DEFAULT_CONFIG = {
     "ollama_host": "http://localhost:11434",
@@ -21,12 +22,7 @@ DEFAULT_CONFIG = {
     },
 }
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Lumen, a concise and helpful assistant running on a local "
-    "Ollama model. Use the web_fetch and search tools when you need "
-    "up-to-date or external information that you are not confident about. "
-    "Keep answers direct and avoid unnecessary padding."
-)
+DEFAULT_SYSTEM_PROMPT = (Path(__file__).parent / "default_systemprompt.txt").read_text().strip()
 
 
 def _merge_defaults(cfg, defaults):
@@ -87,6 +83,21 @@ def save_system_prompt(text, path=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     text = text.rstrip("\n")
     target.write_text(text + "\n")
+
+
+def list_system_prompts():
+    """Files in ~/.config/lumen/systemprompts/, for the Ctrl+P picker.
+
+    Bootstrapped with one starter file on first use so the picker is never
+    empty; left alone once anything exists there.
+    """
+    SYSTEM_PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted(p for p in SYSTEM_PROMPTS_DIR.iterdir() if p.is_file())
+    if not files:
+        starter = SYSTEM_PROMPTS_DIR / "default.txt"
+        starter.write_text(DEFAULT_SYSTEM_PROMPT + "\n")
+        files = [starter]
+    return files
 
 
 def expand_system_prompt(text):

@@ -240,6 +240,7 @@ Enter - send message
 Up/Down - browse input history
 Ctrl+W - delete last word
 Ctrl+S - edit system prompt
+Ctrl+P - pick a system prompt from ~/.config/lumen/systemprompts/
 Ctrl+T - collapse/expand all thinking blocks
 Ctrl+U - toggle tool use for this session
 Esc / Ctrl+X - stop the model, stay in chat
@@ -389,6 +390,66 @@ def select_model_screen(stdscr, client, config, systemprompt_path=None):
             continue
 
 
+def select_systemprompt_screen(stdscr, current_path=None):
+    """Same list-picker style as select_model_screen, over
+    ~/.config/lumen/systemprompts/ instead of the Ollama model list.
+    """
+    curses.curs_set(0)
+    idx = 0
+    files = config_mod.list_system_prompts()
+
+    current_resolved = Path(current_path).expanduser() if current_path else config_mod.SYSTEM_PROMPT_FILE
+    for i, f in enumerate(files):
+        if f == current_resolved:
+            idx = i
+            break
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        draw_top_bar(stdscr, w)
+        safe_addstr(stdscr, 2, 2, "Select a system prompt", curses.A_BOLD)
+        safe_addstr(
+            stdscr, 3, 2,
+            "up/down move   Enter select   q/Esc cancel",
+            curses.color_pair(COLOR_DIM),
+        )
+        safe_addstr(
+            stdscr, 4, 2,
+            f"Reading from {config_mod.SYSTEM_PROMPTS_DIR}",
+            curses.color_pair(COLOR_DIM),
+        )
+
+        if not files:
+            safe_addstr(stdscr, 6, 2, "No prompt files found.", curses.color_pair(COLOR_DIM))
+        else:
+            list_top = 6
+            visible = max(1, h - list_top - 2)
+            max_start = max(0, len(files) - visible)
+            start = max(0, min(idx - visible // 2, max_start))
+            for row, f in enumerate(files[start:start + visible]):
+                fi = start + row
+                size_str = human_size(f.stat().st_size)
+                line = f"{f.name:<40} {size_str:>10}"
+                attr = curses.color_pair(COLOR_LIST) | curses.A_REVERSE if fi == idx else curses.color_pair(COLOR_LIST)
+                safe_addstr(stdscr, list_top + row, 2, line[: w - 4].ljust(min(len(line), w - 4)), attr)
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            idx = min(max(0, len(files) - 1), idx + 1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            if files:
+                return files[idx]
+        elif key in (ord("q"), ord("Q"), 27):
+            return None
+        elif key == curses.KEY_RESIZE:
+            continue
+
+
 def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     model_name = model_info.get("name", "?")
     curses.curs_set(1)
@@ -515,7 +576,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         return quit_requested, outcome
 
     HELP_TEXT = (
-        "Ctrl+S sys  Ctrl+T think  Ctrl+U tools  Esc/^X stop  Ctrl+N new  Ctrl+B back  "
+        "Ctrl+S/P prompt  Ctrl+T think  Ctrl+U tools  Esc/^X stop  Ctrl+N new  Ctrl+B back  "
         "Ctrl+Q/C/exit quit"
     )
 
@@ -620,6 +681,16 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
                 system_prompt = config_mod.load_system_prompt(systemprompt_path)
                 convo.set_system_prompt(config_mod.expand_system_prompt(system_prompt))
                 status_msg = "System prompt updated."
+            render()
+            continue
+        if key == 16:  # Ctrl+P: pick a system prompt from ~/.config/lumen/systemprompts/
+            chosen = select_systemprompt_screen(stdscr, systemprompt_path)
+            curses.curs_set(1)
+            if chosen is not None:
+                systemprompt_path = str(chosen)
+                system_prompt = config_mod.load_system_prompt(systemprompt_path)
+                convo.set_system_prompt(config_mod.expand_system_prompt(system_prompt))
+                status_msg = f"System prompt: {chosen.name}"
             render()
             continue
         if key == 20:  # Ctrl+T: bulk collapse/expand all thinking blocks
