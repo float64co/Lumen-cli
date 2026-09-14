@@ -61,19 +61,32 @@ def save_config(cfg):
     CONFIG_FILE.write_text(hcl.dumps(cfg) + "\n")
 
 
-def load_system_prompt():
-    ensure_files()
+def load_system_prompt(path=None):
+    """Load a system prompt. With no `path`, uses the default
+    ~/.config/lumen/systemprompt.txt (bootstrapped if missing). A custom
+    `path` is bootstrapped with the default prompt too if it doesn't exist
+    yet, so -s/--systemprompt works the same way for a brand-new file.
+    """
+    if path is None:
+        ensure_files()
+        target = SYSTEM_PROMPT_FILE
+    else:
+        target = Path(path).expanduser()
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(DEFAULT_SYSTEM_PROMPT + "\n")
     try:
-        text = SYSTEM_PROMPT_FILE.read_text()
+        text = target.read_text()
     except Exception:
         return DEFAULT_SYSTEM_PROMPT
     return text.strip("\n") or DEFAULT_SYSTEM_PROMPT
 
 
-def save_system_prompt(text):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+def save_system_prompt(text, path=None):
+    target = Path(path).expanduser() if path else SYSTEM_PROMPT_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
     text = text.rstrip("\n")
-    SYSTEM_PROMPT_FILE.write_text(text + "\n")
+    target.write_text(text + "\n")
 
 
 def expand_system_prompt(text):

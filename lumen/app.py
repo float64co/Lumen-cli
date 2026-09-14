@@ -17,12 +17,23 @@ def main():
         default=None,
         help="Override the Ollama host from config.hcl (e.g. http://localhost:11434)",
     )
+    parser.add_argument(
+        "-s", "--systemprompt",
+        dest="systemprompt",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to an alternate system prompt text file (default: "
+            "~/.config/lumen/systemprompt.txt). Created with the default "
+            "prompt if it doesn't exist yet."
+        ),
+    )
     args = parser.parse_args()
 
     config_mod.ensure_files()
 
     try:
-        curses.wrapper(tui.run, args.host)
+        curses.wrapper(tui.run, args.host, args.systemprompt)
     except KeyboardInterrupt:
         pass
 

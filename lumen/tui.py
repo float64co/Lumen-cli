@@ -250,26 +250,30 @@ PgUp/PgDn - scroll the transcript
 click - collapse or expand a thinking/tool block"""
 
 
-def edit_system_prompt_screen(stdscr):
+def edit_system_prompt_screen(stdscr, systemprompt_path=None):
     curses.curs_set(1)
     h, w = stdscr.getmaxyx()
-    current = config_mod.load_system_prompt()
+    current = config_mod.load_system_prompt(systemprompt_path)
+    resolved_path = str(
+        Path(systemprompt_path).expanduser() if systemprompt_path else config_mod.SYSTEM_PROMPT_FILE
+    )
 
     stdscr.erase()
     draw_top_bar(stdscr, w)
     safe_addstr(stdscr, 2, 2, "Edit system prompt", curses.A_BOLD)
+    safe_addstr(stdscr, 3, 2, resolved_path[: max(0, w - 4)], curses.color_pair(COLOR_DIM))
     safe_addstr(
-        stdscr, 3, 2,
+        stdscr, 4, 2,
         "Ctrl+G save   Ctrl+C cancel",
         curses.color_pair(COLOR_DIM),
     )
     safe_addstr(
-        stdscr, 4, 2,
+        stdscr, 5, 2,
         "Variables: $date and $year expand to today's date/year when sent to the model",
         curses.color_pair(COLOR_DIM),
     )
 
-    box_top, box_left = 6, 2
+    box_top, box_left = 7, 2
     box_h = max(3, h - box_top - 1)
     box_w = max(10, w - box_left - 2)
     safe_addstr(stdscr, box_top - 1, box_left, "-" * box_w, curses.color_pair(COLOR_DIM))
@@ -303,12 +307,12 @@ def edit_system_prompt_screen(stdscr):
     text = box.gather().strip()
     curses.curs_set(0)
     if text:
-        config_mod.save_system_prompt(text)
+        config_mod.save_system_prompt(text, systemprompt_path)
         return True
     return False
 
 
-def select_model_screen(stdscr, client, config):
+def select_model_screen(stdscr, client, config, systemprompt_path=None):
     curses.curs_set(0)
     idx = 0
     models = []
@@ -374,7 +378,7 @@ def select_model_screen(stdscr, client, config):
             if models:
                 return models[idx]
         elif key in (ord("s"), ord("S")):
-            edit_system_prompt_screen(stdscr)
+            edit_system_prompt_screen(stdscr, systemprompt_path)
             curses.curs_set(0)
         elif key in (ord("r"), ord("R")):
             status = "Loading models..."
@@ -385,11 +389,11 @@ def select_model_screen(stdscr, client, config):
             continue
 
 
-def chat_screen(stdscr, client, model_info, config):
+def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     model_name = model_info.get("name", "?")
     curses.curs_set(1)
 
-    system_prompt = config_mod.load_system_prompt()
+    system_prompt = config_mod.load_system_prompt(systemprompt_path)
     options = {}
     if config.get("temperature") is not None:
         options["temperature"] = config["temperature"]
@@ -601,10 +605,10 @@ def chat_screen(stdscr, client, model_info, config):
             render()
             continue
         if key == 19:  # Ctrl+S
-            saved = edit_system_prompt_screen(stdscr)
+            saved = edit_system_prompt_screen(stdscr, systemprompt_path)
             curses.curs_set(1)
             if saved:
-                system_prompt = config_mod.load_system_prompt()
+                system_prompt = config_mod.load_system_prompt(systemprompt_path)
                 convo.set_system_prompt(config_mod.expand_system_prompt(system_prompt))
                 status_msg = "System prompt updated."
             render()
@@ -882,7 +886,7 @@ def chat_screen(stdscr, client, model_info, config):
         # ignore anything else (function keys, etc.)
 
 
-def run(stdscr, host_override=None):
+def run(stdscr, host_override=None, systemprompt_path=None):
     curses.curs_set(0)
     curses.raw()  # disable ^S/^Q flow control and ^C/^Z signal chars so
                   # our own Ctrl-key bindings (and ^C-to-cancel) actually
@@ -900,7 +904,7 @@ def run(stdscr, host_override=None):
     client = OllamaClient(config["ollama_host"])
 
     while True:
-        model_info = select_model_screen(stdscr, client, config)
+        model_info = select_model_screen(stdscr, client, config, systemprompt_path)
         if not model_info:
             return
         config["default_model"] = model_info.get("name", "")
@@ -908,6 +912,6 @@ def run(stdscr, host_override=None):
             config_mod.save_config(config)
         except Exception:
             pass
-        result = chat_screen(stdscr, client, model_info, config)
+        result = chat_screen(stdscr, client, model_info, config, systemprompt_path)
         if result != "back":
             return
