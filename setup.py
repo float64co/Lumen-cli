@@ -11,6 +11,9 @@ setup(
         "requests>=2.31",
         "ddgs>=9.0",
     ],
+    extras_require={
+        "trends": ["pytrends-modern>=0.2.13"],
+    },
     entry_points={
         "console_scripts": [
             "lumen=lumen.app:main",

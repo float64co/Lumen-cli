@@ -2,10 +2,11 @@
 Minimal HCL-like config parser/serializer.
 
 Supports the small subset of HCL Lumen actually needs: comments
-(# // and /* */), string/number/bool values, and one level (or more)
-of nested `name { ... }` blocks. It is intentionally not a full HCL2
-implementation -- just enough to keep config.hcl human-editable
-without pulling in a heavier dependency.
+(# // and /* */), string/number/bool values, flat arrays of those
+(`["US", "GB"]`), and one level (or more) of nested `name { ... }`
+blocks. It is intentionally not a full HCL2 implementation -- just
+enough to keep config.hcl human-editable without pulling in a heavier
+dependency.
 """
 
 
@@ -38,7 +39,7 @@ def _tokenize(text):
             tokens.append(("STRING", "".join(buf)))
             i = j + 1
             continue
-        if c in "{}=":
+        if c in "{}=[],":
             tokens.append((c, c))
             i += 1
             continue
@@ -90,16 +91,32 @@ def loads(text):
                 if pos[0] >= len(tokens):
                     break
                 vtype, vval = tokens[pos[0]]
-                pos[0] += 1
-                if vtype == "STRING":
-                    value = vval
-                elif vtype == "NUMBER":
-                    value = float(vval) if "." in vval else int(vval)
-                elif vtype == "BOOL":
-                    value = vval == "true"
+                if vtype == "[":
+                    pos[0] += 1
+                    items = []
+                    while pos[0] < len(tokens) and tokens[pos[0]][0] != "]":
+                        itype, ival = tokens[pos[0]]
+                        if itype == "STRING":
+                            items.append(ival)
+                        elif itype == "NUMBER":
+                            items.append(float(ival) if "." in ival else int(ival))
+                        elif itype == "BOOL":
+                            items.append(ival == "true")
+                        pos[0] += 1
+                    if pos[0] < len(tokens) and tokens[pos[0]][0] == "]":
+                        pos[0] += 1
+                    result[key] = items
                 else:
-                    value = None
-                result[key] = value
+                    pos[0] += 1
+                    if vtype == "STRING":
+                        value = vval
+                    elif vtype == "NUMBER":
+                        value = float(vval) if "." in vval else int(vval)
+                    elif vtype == "BOOL":
+                        value = vval == "true"
+                    else:
+                        value = None
+                    result[key] = value
             elif ntype == "{":
                 pos[0] += 1
                 result[key] = parse_block()
@@ -113,6 +130,8 @@ def _dump_value(v):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
+    if isinstance(v, (list, tuple)):
+        return "[" + ", ".join(_dump_value(item) for item in v) + "]"
     s = str(v).replace("\\", "\\\\").replace('"', '\\"')
     return f'"{s}"'
 

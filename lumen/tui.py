@@ -12,6 +12,7 @@ from . import config as config_mod
 from . import markdown as md_mod
 from . import research as research_mod
 from . import tools as tools_mod
+from . import trends as trends_mod
 from .ollama_client import OllamaError
 
 COLOR_TOPBAR = 1     # white on black -- top branding row only
@@ -241,6 +242,7 @@ Up/Down - browse input history
 Ctrl+W - delete last word
 Ctrl+S - edit system prompt
 Ctrl+P - pick a system prompt from ~/.config/lumen/systemprompts/
+F2 - insert a trending search at the input (needs pytrends-modern)
 Ctrl+T - collapse/expand all thinking blocks
 Ctrl+U - toggle tool use for this session
 Esc / Ctrl+X - stop the model, stay in chat
@@ -450,6 +452,80 @@ def select_systemprompt_screen(stdscr, current_path=None):
             continue
 
 
+def select_trend_screen(stdscr, config):
+    """Same list-picker style as select_model_screen, listing current
+    Google Trends searches (via the optional pytrends-modern dependency)
+    for the geos configured in config.hcl's trend_geos.
+    """
+    curses.curs_set(0)
+    idx = 0
+    trends = []
+    error = None
+    geos = config.get("trend_geos") or ["US", "GB"]
+
+    def fetch():
+        nonlocal trends, error
+        try:
+            trends = trends_mod.fetch_trends(geos)
+            error = None
+        except Exception as e:
+            trends = []
+            error = str(e)
+
+    fetch()
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        draw_top_bar(stdscr, w)
+        safe_addstr(stdscr, 2, 2, "Select a trend", curses.A_BOLD)
+        safe_addstr(
+            stdscr, 3, 2,
+            "up/down move   Enter select   r refresh   q/Esc cancel",
+            curses.color_pair(COLOR_DIM),
+        )
+        safe_addstr(
+            stdscr, 4, 2,
+            f"Geos: {', '.join(geos)}",
+            curses.color_pair(COLOR_DIM),
+        )
+
+        if error:
+            safe_addstr(stdscr, 6, 2, f"Error: {error}"[: w - 4], curses.color_pair(COLOR_ERROR))
+            safe_addstr(stdscr, 7, 2, "Press r to retry, q to cancel.", curses.color_pair(COLOR_DIM))
+        elif not trends:
+            safe_addstr(stdscr, 6, 2, "No trends found.", curses.color_pair(COLOR_DIM))
+        else:
+            list_top = 6
+            visible = max(1, h - list_top - 2)
+            max_start = max(0, len(trends) - visible)
+            start = max(0, min(idx - visible // 2, max_start))
+            for row, t in enumerate(trends[start:start + visible]):
+                ti = start + row
+                label = f"[{t['geo']}] {t['title']}"
+                traffic_str = f"{t['traffic']}+" if t.get("traffic") else ""
+                line = f"{label:<60} {traffic_str:>12}"
+                attr = curses.color_pair(COLOR_LIST) | curses.A_REVERSE if ti == idx else curses.color_pair(COLOR_LIST)
+                safe_addstr(stdscr, list_top + row, 2, line[: w - 4].ljust(min(len(line), w - 4)), attr)
+
+        stdscr.refresh()
+        key = stdscr.getch()
+
+        if key in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            idx = min(max(0, len(trends) - 1), idx + 1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            if trends:
+                return trends[idx]["title"]
+        elif key in (ord("r"), ord("R")):
+            fetch()
+        elif key in (ord("q"), ord("Q"), 27):
+            return None
+        elif key == curses.KEY_RESIZE:
+            continue
+
+
 def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     model_name = model_info.get("name", "?")
     curses.curs_set(1)
@@ -576,9 +652,11 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         return quit_requested, outcome
 
     HELP_TEXT = (
-        "Ctrl+S/P prompt  Ctrl+T think  Ctrl+U tools  Esc/^X stop  Ctrl+N new  Ctrl+B back  "
-        "Ctrl+Q/C/exit quit"
+        "Ctrl+S/P prompt Ctrl+T think Ctrl+U tools Esc/X stop "
+        "Ctrl+N new Ctrl+B back Ctrl+Q/C quit"
     )
+    if trends_mod.AVAILABLE:
+        HELP_TEXT += " F2 trend"
 
     def add_block(role, text, meta=None):
         history.append([role, text, meta, datetime.now().strftime("%H:%M:%S")])
@@ -691,6 +769,17 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
                 system_prompt = config_mod.load_system_prompt(systemprompt_path)
                 convo.set_system_prompt(config_mod.expand_system_prompt(system_prompt))
                 status_msg = f"System prompt: {chosen.name}"
+            render()
+            continue
+        if key == curses.KEY_F2:  # F2: insert a trending search at the input
+            if not trends_mod.AVAILABLE:
+                status_msg = "Trend selector needs pytrends-modern (pip install lumen-cli[trends])."
+                render()
+                continue
+            chosen = select_trend_screen(stdscr, config)
+            curses.curs_set(1)
+            if chosen:
+                input_buf += chosen
             render()
             continue
         if key == 20:  # Ctrl+T: bulk collapse/expand all thinking blocks
