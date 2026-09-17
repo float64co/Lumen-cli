@@ -20,7 +20,7 @@ DEFAULT_CONFIG = {
         "web_fetch": True,
         "search": True,
     },
-    "trend_geos": ["US", "GB"],
+    "trend_geos": ["GB", "IE", "US", "CA", "AU", "NZ"],
 }
 
 DEFAULT_SYSTEM_PROMPT = (Path(__file__).parent / "default_systemprompt.txt").read_text().strip()
