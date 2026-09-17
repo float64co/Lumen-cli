@@ -87,13 +87,18 @@ def draw_top_bar(stdscr, width):
         safe_addstr(stdscr, 0, col, " " * rest, fill_attr)
 
 
-def _erase_last_word(s):
-    """Ctrl+W: delete the trailing word (and the whitespace before it)."""
-    s = s.rstrip()
-    i = len(s)
-    while i > 0 and not s[i - 1].isspace():
+def _erase_word_before(s, pos):
+    """Ctrl+W: delete the word (and whitespace before it) immediately
+    before `pos`, leaving the text at and after `pos` untouched.
+    Returns (new_s, new_pos).
+    """
+    before, after = s[:pos], s[pos:]
+    before = before.rstrip()
+    i = len(before)
+    while i > 0 and not before[i - 1].isspace():
         i -= 1
-    return s[:i]
+    before = before[:i]
+    return before + after, len(before)
 
 
 def human_size(n):
@@ -549,6 +554,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
 
     history = []
     input_buf = ""
+    cursor_pos = 0
     scroll = 0
     prev_max_start = 0  # lets render() keep an up-scrolled view pinned in place
     status_msg = ""
@@ -560,7 +566,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
     last_report = None  # most recent /research Polish output; /save prefers this
 
     def _history_prev():
-        nonlocal input_buf, hist_idx, hist_draft
+        nonlocal input_buf, cursor_pos, hist_idx, hist_draft
         if not input_history:
             return
         if hist_idx is None:
@@ -569,9 +575,10 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         elif hist_idx > 0:
             hist_idx -= 1
         input_buf = input_history[hist_idx]
+        cursor_pos = len(input_buf)
 
     def _history_next():
-        nonlocal input_buf, hist_idx, hist_draft
+        nonlocal input_buf, cursor_pos, hist_idx, hist_draft
         if hist_idx is None:
             return
         if hist_idx < len(input_history) - 1:
@@ -580,6 +587,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         else:
             hist_idx = None
             input_buf = hist_draft
+        cursor_pos = len(input_buf)
 
     def _run_worker(work_fn):
         """Run work_fn(stop_event, dirty) on a background thread while the
@@ -592,7 +600,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         Returns (quit_requested, outcome) where outcome has "error" (an
         OllamaError or None) and "done" (always True once this returns).
         """
-        nonlocal input_buf, status_msg
+        nonlocal input_buf, cursor_pos, status_msg
         dirty = {"flag": False}
         stop_event = threading.Event()
         outcome = {"error": None, "done": False}
@@ -628,10 +636,18 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
             if k == curses.KEY_RESIZE:
                 dirty["flag"] = True
             elif k in (curses.KEY_BACKSPACE, 127, 8):
-                input_buf = input_buf[:-1]
+                if cursor_pos > 0:
+                    input_buf = input_buf[:cursor_pos - 1] + input_buf[cursor_pos:]
+                    cursor_pos -= 1
+                    dirty["flag"] = True
+            elif k == curses.KEY_LEFT:
+                cursor_pos = max(0, cursor_pos - 1)
+                dirty["flag"] = True
+            elif k == curses.KEY_RIGHT:
+                cursor_pos = min(len(input_buf), cursor_pos + 1)
                 dirty["flag"] = True
             elif k == 23:  # Ctrl+W: delete last word
-                input_buf = _erase_last_word(input_buf)
+                input_buf, cursor_pos = _erase_word_before(input_buf, cursor_pos)
                 dirty["flag"] = True
             elif k == curses.KEY_UP:
                 _history_prev()
@@ -645,7 +661,8 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
                     quit_requested = True
                     break
             elif 32 <= k < 127:
-                input_buf += chr(k)
+                input_buf = input_buf[:cursor_pos] + chr(k) + input_buf[cursor_pos:]
+                cursor_pos += 1
                 dirty["flag"] = True
         stdscr.timeout(-1)
         gen_thread.join(timeout=2.0)
@@ -727,7 +744,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         safe_addstr(stdscr, status_row, 0, status_line[: max(0, w - 1)], curses.color_pair(COLOR_DIM))
         safe_addstr(stdscr, help_row, 0, HELP_TEXT[: max(0, w - 1)], curses.color_pair(COLOR_DIM))
 
-        stdscr.move(input_row, min(w - 1, len(prompt)))
+        stdscr.move(input_row, min(w - 1, 2 + cursor_pos))
         stdscr.refresh()
 
     render()
@@ -779,7 +796,8 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
             chosen = select_trend_screen(stdscr, config)
             curses.curs_set(1)
             if chosen:
-                input_buf += chosen
+                input_buf = input_buf[:cursor_pos] + chosen + input_buf[cursor_pos:]
+                cursor_pos += len(chosen)
             render()
             continue
         if key == 20:  # Ctrl+T: bulk collapse/expand all thinking blocks
@@ -810,11 +828,21 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
             render()
             continue
         if key in (curses.KEY_BACKSPACE, 127, 8):
-            input_buf = input_buf[:-1]
+            if cursor_pos > 0:
+                input_buf = input_buf[:cursor_pos - 1] + input_buf[cursor_pos:]
+                cursor_pos -= 1
+            render()
+            continue
+        if key == curses.KEY_LEFT:
+            cursor_pos = max(0, cursor_pos - 1)
+            render()
+            continue
+        if key == curses.KEY_RIGHT:
+            cursor_pos = min(len(input_buf), cursor_pos + 1)
             render()
             continue
         if key == 23:  # Ctrl+W: delete last word
-            input_buf = _erase_last_word(input_buf)
+            input_buf, cursor_pos = _erase_word_before(input_buf, cursor_pos)
             render()
             continue
         if key == curses.KEY_UP:
@@ -836,6 +864,7 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
         if key in (10, 13, curses.KEY_ENTER):
             text = input_buf.strip()
             input_buf = ""
+            cursor_pos = 0
             if not text:
                 render()
                 continue
@@ -1050,7 +1079,8 @@ def chat_screen(stdscr, client, model_info, config, systemprompt_path=None):
             continue
 
         if 32 <= key < 127:
-            input_buf += chr(key)
+            input_buf = input_buf[:cursor_pos] + chr(key) + input_buf[cursor_pos:]
+            cursor_pos += 1
             render()
             continue
         # ignore anything else (function keys, etc.)
